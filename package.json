@@ -1,0 +1,17 @@
+{
+  "name": "crypto-trading-tool",
+  "type": "module",
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name crypto-tool3 --branch main"
+  },
+  "dependencies": {
+    "astro": "^7.0.2"
+  },
+  "devDependencies": {
+    "wrangler": "^4.104.0"
+  }
+}

@@ -1,0 +1,251 @@
+---
+// index.astro — Main application shell
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Crypto Trading Tool</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" />
+  <link rel="stylesheet" href="/styles/global.css" />
+</head>
+<body>
+
+<div class="app-shell" id="app">
+
+  <!-- ── Chart panel ─────────────────────────────────── -->
+  <section class="chart-panel">
+    <header class="chart-header">
+      <div class="chart-title" id="chart-title">Select a coin</div>
+      <div class="chart-controls">
+        <button class="chart-btn" id="btn-draw" title="Draw lines (D)">✏</button>
+        <button class="chart-btn" id="btn-clear" title="Clear lines">🗑</button>
+        <select class="chart-select" id="select-indicator">
+          <option value="none">No indicator</option>
+          <option value="diagonal" selected>Diagonal S/R</option>
+          <option value="bounce">Bounce S/R</option>
+          <option value="mrc">Mean Reversion</option>
+          <option value="trendline">Trendlines</option>
+        </select>
+        <button class="chart-btn" id="btn-fullscreen" title="Fullscreen">⛶</button>
+        <div class="tf-btns">
+          {['1m','5m','15m','1h','4h','1d'].map(tf => (
+            <button class:list={['tf-btn', tf === '15m' && 'active']} data-tf={tf}>{tf}</button>
+          ))}
+        </div>
+      </div>
+    </header>
+
+    <div class="chart-body" id="chart-body">
+      <div class="zoom-btns">
+        <button class="zoom-btn" id="btn-zoom-in"  title="Zoom in (+)">+</button>
+        <button class="zoom-btn" id="btn-zoom-out" title="Zoom out (−)">−</button>
+      </div>
+
+      <!-- Overlays -->
+      <div class="chart-overlay" id="overlay-placeholder">
+        <span class="placeholder-icon">📊</span>
+        <span class="placeholder-text">Select a coin to load chart</span>
+      </div>
+      <div class="chart-overlay hidden" id="overlay-loading">
+        <div class="spinner"></div>
+        <span style="color:var(--text-lo);font-size:12px">Loading...</span>
+      </div>
+      <div class="chart-overlay hidden" id="overlay-error" style="color:var(--bear)"></div>
+
+      <!-- Line status popup -->
+      <div class="line-status-popup" id="line-status"></div>
+
+      <!-- Canvas layers -->
+      <div class="price-canvas-wrap">
+        <canvas id="price-canvas"></canvas>
+      </div>
+      <div class="volume-canvas-wrap">
+        <canvas id="volume-canvas"></canvas>
+      </div>
+
+      <!-- Latest button -->
+      <button class="latest-btn" id="btn-latest">📍 Latest</button>
+    </div>
+  </section>
+
+  <!-- ── Side panel ───────────────────────────────────── -->
+  <aside class="side-panel">
+    <nav class="tabs-nav" role="tablist">
+      <button class="tab-btn active" data-tab="coins"   role="tab">Coins</button>
+      <button class="tab-btn"        data-tab="alerts"  role="tab">
+        Alerts <span class="tab-badge" id="alert-badge">0</span>
+      </button>
+      <button class="tab-btn"        data-tab="trade"   role="tab">Trade</button>
+      <button class="tab-btn"        data-tab="scanner" role="tab">Scanner</button>
+    </nav>
+
+    <!-- Coins tab -->
+    <div class="tab-panel active" id="tab-coins" role="tabpanel">
+      <div class="filters-bar">
+        <select class="filter-select" id="exch-select">
+          <option value="binance">Binance</option>
+          <option value="bybit">Bybit</option>
+        </select>
+        <span class="filter-label">Coin:</span>
+        <input class="filter-input" type="text" id="sym-filter" placeholder="BTC…" />
+        <button class="clear-btn" id="sym-clear" title="Clear">×</button>
+        <span class="filter-label">Vol(M):</span>
+        <input class="filter-input" type="number" id="vol-filter" value="20" min="0" step="1" />
+        <button class="refresh-btn" id="btn-refresh" title="Refresh">↻</button>
+      </div>
+      <div class="table-wrap">
+        <table class="coins-table" id="coins-table">
+          <thead>
+            <tr>
+              <th class="sortable" data-sort="symbol">Symbol</th>
+              <th class="sortable" data-sort="lastPrice">Price</th>
+              <th class="sortable sort-desc" data-sort="priceChangePercent">Chg %</th>
+              <th class="sortable" data-sort="volumeChange">Vol %</th>
+              <th class="sortable" data-sort="quoteVolume">Volume</th>
+            </tr>
+          </thead>
+          <tbody id="coins-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Alerts tab -->
+    <div class="tab-panel" id="tab-alerts" role="tabpanel">
+      <div class="filters-bar" style="justify-content:space-between">
+        <span class="filter-label">Active alerts</span>
+        <button class="chart-btn" id="btn-clear-alerts" style="font-size:11px">Clear all</button>
+      </div>
+      <div class="alerts-panel" id="alerts-list"></div>
+    </div>
+
+    <!-- Trade tab -->
+    <div class="tab-panel" id="tab-trade" role="tabpanel">
+      <div class="trade-panel" id="trade-panel">
+        <!-- Auth form shown first; replaced by order ticket after auth -->
+        <div class="auth-form" id="auth-form">
+          <div class="section-label">Connect Exchange</div>
+          <div class="field-row">
+            <label class="field-label">Exchange</label>
+            <select class="field-input" id="trade-exch" style="height:30px">
+              <option value="binance">Binance Futures</option>
+              <option value="bybit">Bybit Linear</option>
+            </select>
+          </div>
+          <div class="field-row">
+            <label class="field-label">API Key</label>
+            <input class="field-input" type="text" id="api-key" placeholder="Enter API key" autocomplete="off" />
+          </div>
+          <div class="field-row">
+            <label class="field-label">API Secret</label>
+            <input class="field-input" type="password" id="api-secret" placeholder="Enter API secret" autocomplete="off" />
+          </div>
+          <div id="auth-error" style="color:var(--bear);font-size:11px;display:none"></div>
+          <button class="btn-primary" id="btn-connect">Connect</button>
+          <div style="font-size:10px;color:var(--text-lo);line-height:1.5">
+            Keys are stored locally and never sent to third-party servers.<br>
+            Use read + futures-trade permissions, no withdrawal.
+          </div>
+        </div>
+
+        <!-- Order ticket (hidden until auth) -->
+        <div id="order-section" style="display:none">
+          <div class="auth-form" style="background:transparent;border:none;padding:0;gap:6px">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <div class="section-label" style="margin:0">Order Ticket</div>
+              <button class="chart-btn" id="btn-disconnect" style="font-size:10px">Disconnect</button>
+            </div>
+            <div id="trade-symbol" style="font-family:var(--font-mono);font-size:13px;font-weight:600;color:var(--accent)">—</div>
+            <div class="btn-row">
+              <button class="btn-buy active"  id="btn-buy"  onclick="this.parentElement.querySelector('.btn-sell').classList.remove('active'); this.classList.add('active')">BUY</button>
+              <button class="btn-sell"        id="btn-sell" onclick="this.parentElement.querySelector('.btn-buy').classList.remove('active'); this.classList.add('active')">SELL</button>
+            </div>
+            <div class="btn-row" style="gap:4px">
+              <button class="chart-btn active" id="btn-market" data-mode="market">Market</button>
+              <button class="chart-btn"        id="btn-limit"  data-mode="limit">Limit</button>
+            </div>
+            <div class="field-row" id="limit-price-row" style="display:none">
+              <label class="field-label">Limit Price (USDT)</label>
+              <input class="field-input" type="number" id="limit-price" placeholder="0.00" />
+            </div>
+            <div class="field-row">
+              <label class="field-label">Stop Loss (USDT)</label>
+              <div style="display:flex;gap:4px">
+                <input class="field-input" type="number" id="stop-loss" placeholder="0.00" style="flex:1" />
+                <button class="chart-btn" id="btn-set-stop-chart" title="Set stop from chart">📊</button>
+              </div>
+            </div>
+            <div class="field-row">
+              <label class="field-label">Max Loss (USDT)</label>
+              <input class="field-input" type="number" id="max-loss" placeholder="50" value="50" />
+            </div>
+            <div class="field-row">
+              <label class="field-label">Leverage</label>
+              <input class="field-input" type="number" id="leverage-input" value="10" min="1" max="100" />
+            </div>
+            <div class="order-preview" id="order-preview" style="display:none"></div>
+            <button class="btn-primary" id="btn-place-order" disabled>Place Order</button>
+          </div>
+
+          <div id="positions-section">
+            <div class="section-label" style="margin:8px 0 6px">Open Positions</div>
+            <div class="positions-list" id="positions-list">
+              <div style="color:var(--text-lo);font-size:11px;text-align:center;padding:12px">No open positions</div>
+            </div>
+            <div class="section-label" style="margin:10px 0 6px">Open Orders</div>
+            <div id="orders-list">
+              <div style="color:var(--text-lo);font-size:11px;text-align:center;padding:12px">No open orders</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scanner tab -->
+    <div class="tab-panel" id="tab-scanner" role="tabpanel">
+      <div class="scanner-panel">
+        <div class="scanner-controls">
+          <div class="scanner-row">
+            <select class="filter-select" id="scan-exch">
+              <option value="binance">Binance</option>
+              <option value="bybit">Bybit</option>
+            </select>
+            <span class="filter-label">Vol(M):</span>
+            <input class="filter-input" type="number" id="scan-vol" value="20" min="0" style="width:55px" />
+            <span class="filter-label">Secs:</span>
+            <input class="filter-input" type="number" id="scan-secs" value="5" min="1" style="width:50px" />
+          </div>
+          <div class="scanner-row">
+            <button class="btn-scan-start" id="btn-scan-start">▶ Start</button>
+            <button class="btn-scan-stop"  id="btn-scan-stop" style="display:none">■ Stop</button>
+            <span class="scanner-progress" id="scan-progress"></span>
+          </div>
+        </div>
+        <div class="scanner-table-wrap">
+          <table class="scanner-table" id="scanner-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Chg %</th>
+                <th>Vol %</th>
+              </tr>
+            </thead>
+            <tbody id="scanner-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toasts"></div>
+
+<script src="/scripts/app.js" type="module"></script>
+</body>
+</html>
