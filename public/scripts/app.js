@@ -179,6 +179,16 @@ function renderChart() {
   drawCandles(ctx, s);
   drawCurrentPrice(ctx, s);
   if (activeIndicator === 'diagonal') drawDiagLines(ctx, s);
+  else if (activeIndicator === 'bounce' && window.indicators?.bounce) {
+    const lines = window.indicators.bounce.calculate(chartData);
+    window.indicators.bounce.render(ctx, s, lines);
+  } else if (activeIndicator === 'mrc' && window.indicators?.mrc) {
+    const result = window.indicators.mrc.calculate(chartData);
+    window.indicators.mrc.render(ctx, s, result);
+  } else if (activeIndicator === 'trendline' && window.indicators?.trendline) {
+    const lines = window.indicators.trendline.calculate(chartData);
+    window.indicators.trendline.render(ctx, s, lines);
+  }
   drawManualLines(ctx, s);
   drawAlertLines(ctx, s);
   if (stopLossMode) drawStopLossPreview(ctx, s);
@@ -420,6 +430,10 @@ async function loadChart(symbol, exchange) {
     );
 
     if (activeIndicator === 'diagonal') diagLines = calcDiagSR(chartData);
+    else resetIndicator();
+
+    // §9.3: compute & cache 12h volume change lazily after chart load
+    updateVolumeChange(symbol, chartData, currentInterval).catch(() => {});
 
     document.getElementById('overlay-loading').classList.add('hidden');
     scrollOffset = 0;
@@ -740,8 +754,28 @@ document.getElementById('btn-fullscreen').addEventListener('click', () => {
 document.getElementById('select-indicator').addEventListener('change', e => {
   activeIndicator = e.target.value;
   diagLines = activeIndicator === 'diagonal' ? calcDiagSR(chartData) : [];
+  resetIndicator();
+  // Show MRC settings button if MRC active
+  const mrcBtn = document.getElementById('btn-mrc-settings');
+  if (mrcBtn) mrcBtn.style.display = activeIndicator === 'mrc' ? 'inline-flex' : 'none';
   markDirty();
 });
+
+function resetIndicator() {
+  window.indicators?.bounce?.reset();
+  window.indicators?.mrc?.reset();
+  window.indicators?.trendline?.reset();
+}
+
+// MRC settings button — injected next to indicator dropdown
+(function() {
+  const sel = document.getElementById('select-indicator');
+  const btn = document.createElement('button');
+  btn.id = 'btn-mrc-settings'; btn.className = 'chart-btn'; btn.title = 'MRC Settings';
+  btn.textContent = '⚙'; btn.style.display = 'none';
+  btn.addEventListener('click', () => window.indicators?.mrc?.openSettings());
+  sel.insertAdjacentElement('afterend', btn);
+})();
 
 window.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
@@ -938,10 +972,20 @@ setInterval(() => {
           al.isTriggered = true; al.triggeredAt = Date.now(); al.triggerPrice = p;
           if (al.frequency === 'once') al.isActive = false;
           changed = true; playAlertSound();
+          notifySwAlert(al, p);
           showToast(`🚨 ${al.symbol} ${al.type} ${fmtPrice(al.targetPrice)}`, 'success');
         }
       }
       if (changed) { saveAlertsLocal(all); renderAlerts(); updateAlertBadge(); markDirty(); }
+
+      // Feed prices to trailing stop engine
+      if (tradingCreds && window.trading?.trailingStop) {
+        for (const [sym, price] of Object.entries(pm)) {
+          if (window.trading.trailingStop.get(sym)) {
+            window.trading.trailingStop.onPriceUpdate(sym, price, tradingCreds);
+          }
+        }
+      }
     }).catch(() => {});
 }, 2000);
 
@@ -955,6 +999,7 @@ try { tradingCreds = JSON.parse(sessionStorage.getItem(CREDS_KEY) || 'null'); } 
 
 if (tradingCreds) {
   isAuthenticated = true;
+  window.trading?.setCreds(tradingCreds);
   document.getElementById('auth-form').style.display    = 'none';
   document.getElementById('order-section').style.display = 'block';
   loadPositions();
@@ -976,6 +1021,8 @@ document.getElementById('btn-connect').addEventListener('click', async () => {
     tradingCreds = { apiKey: key, apiSecret: sec, exchange: exch };
     // FIX: sessionStorage — not persisted across browser restarts
     sessionStorage.setItem(CREDS_KEY, JSON.stringify(tradingCreds));
+    // Wire trading module
+    window.trading?.setCreds(tradingCreds);
     isAuthenticated = true;
     document.getElementById('auth-form').style.display    = 'none';
     document.getElementById('order-section').style.display = 'block';
@@ -1047,8 +1094,32 @@ document.getElementById('btn-set-stop-chart').addEventListener('click', () => {
   stopLossMode = true; priceCanvas.style.cursor = 'crosshair';
   showToast('Click chart to set stop loss price');
 });
-document.getElementById('btn-place-order').addEventListener('click', () =>
-  showToast('Order placement requires signed API integration', 'error'));
+document.getElementById('btn-place-order').addEventListener('click', async () => {
+  if (!tradingCreds || !currentSymbol) return;
+  const btn      = document.getElementById('btn-place-order');
+  const stopVal  = parseFloat(document.getElementById('stop-loss').value);
+  const maxLoss  = parseFloat(document.getElementById('max-loss').value) || 50;
+  const leverage = parseInt(document.getElementById('leverage-input').value) || 10;
+  const type     = tradeMode === 'limit' ? 'LIMIT' : 'MARKET';
+  const price    = type === 'LIMIT' ? parseFloat(document.getElementById('limit-price').value) : 0;
+
+  if (!stopVal || isNaN(stopVal)) { showToast('Set a stop loss price first', 'error'); return; }
+  btn.textContent = 'Placing…'; btn.disabled = true;
+  try {
+    const result = await window.trading.placeOrder({
+      symbol: currentSymbol, side: tradeSide, type, price,
+      stopLoss: stopVal, maxLoss, leverage, creds: tradingCreds,
+    });
+    showToast(`✅ Order placed — qty ${result.qty.toFixed(4)}, risk ${result.actRisk.toFixed(2)} USDT${result.stopErr ? ' (stop failed: ' + result.stopErr + ')' : ''}`, 'success');
+    document.getElementById('stop-loss').value = '';
+    computeOrderPreview();
+    await refreshPositionsAndOrders();
+  } catch (e) {
+    showToast('Order failed: ' + e.message, 'error');
+  } finally {
+    btn.textContent = 'Place Order'; btn.disabled = false;
+  }
+});
 
 // FIX: skip position polling when tab is hidden
 async function loadPositions() {
@@ -1056,9 +1127,8 @@ async function loadPositions() {
   document.getElementById('positions-list').innerHTML =
     '<div style="color:var(--text-lo);font-size:11px;text-align:center;padding:12px">Loading…</div>';
   try {
-    const res  = await fetch(`https://fapi.binance.com/fapi/v2/positionRisk?timestamp=${Date.now()}`, { headers: { 'X-MBX-APIKEY': tradingCreds.apiKey } });
-    const data = await res.json();
-    renderPositions(Array.isArray(data) ? data.filter(p => +p.positionAmt !== 0) : []);
+    const positions = await window.trading.getPositions(tradingCreds);
+    renderPositions(positions);
   } catch (e) {
     // FIX: use textContent to avoid XSS via error message from Binance HTML error pages
     const el = document.getElementById('positions-list');
@@ -1077,21 +1147,99 @@ function renderPositions(positions) {
     return;
   }
   el.innerHTML = positions.map(p => {
-    const side = +p.positionAmt > 0 ? 'LONG' : 'SHORT';
-    const pnl  = +p.unRealizedProfit;
+    const pnl     = p.unRealizedProfit;
+    const tsConf  = window.trading?.trailingStop?.get(p.symbol);
+    const tsLabel = tsConf ? `TS L${tsConf.currentLevel} 🔒${fmtPrice(tsConf.currentStop)}` : '';
     return `<div class="position-card">
       <div class="pos-header">
         <span class="pos-sym">${p.symbol.replace('USDT','/USDT')}</span>
-        <span class="pos-side ${side.toLowerCase()}">${side}</span>
+        <span class="pos-side ${p.side.toLowerCase()}">${p.side}</span>
       </div>
       <div style="display:flex;justify-content:space-between;margin-top:2px">
-        <span style="color:var(--text-lo)">Entry: ${fmtPrice(+p.entryPrice)}</span>
+        <span style="color:var(--text-lo)">Entry: ${fmtPrice(p.entryPrice)}</span>
         <span class="pos-pnl ${pnl >= 0 ? 'bull' : 'bear'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT</span>
       </div>
-      <button class="pos-close-btn" onclick="showToast('Add signed API keys to place orders')">Close</button>
+      <div style="display:flex;justify-content:space-between;margin-top:2px;font-size:10px;color:var(--text-lo)">
+        <span>Qty: ${p.positionAmt} · Lev: ${p.leverage}x</span>
+        ${tsLabel ? `<span style="color:var(--accent)">${tsLabel}</span>` : ''}
+      </div>
+      <div style="display:flex;gap:4px;margin-top:6px">
+        <button class="pos-close-btn" style="flex:1" onclick="window.doClosePosition('${p.symbol}','${p.side}',${p.positionAmt})">Close</button>
+        ${!tsConf ? `<button class="pos-close-btn" style="flex:1;border-color:var(--accent);color:var(--accent)" onclick="window.doEnableTrailingStop('${p.symbol}','${p.side}',${p.positionAmt},${p.entryPrice})">Trail</button>` : `<button class="pos-close-btn" style="flex:1" onclick="window.doDisableTrailingStop('${p.symbol}')">Stop TS</button>`}
+      </div>
     </div>`;
   }).join('');
 }
+
+async function loadOpenOrders(symbol) {
+  if (!tradingCreds || !symbol) return;
+  const el = document.getElementById('orders-list');
+  el.innerHTML = '<div style="color:var(--text-lo);font-size:11px;text-align:center;padding:8px">Loading…</div>';
+  try {
+    const orders = await window.trading.getOpenOrders(symbol, tradingCreds);
+    if (!orders.length) {
+      el.innerHTML = '<div style="color:var(--text-lo);font-size:11px;text-align:center;padding:8px">No open orders</div>';
+      return;
+    }
+    el.innerHTML = orders.map(o => `
+      <div class="position-card" style="margin-bottom:4px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-family:var(--font-mono);font-size:11px;font-weight:600">${o.side} ${o.type}</span>
+          <button class="pos-close-btn" onclick="window.doCancelOrder('${o.symbol}','${o.orderId}')">Cancel</button>
+        </div>
+        <div style="font-size:10px;color:var(--text-lo);margin-top:2px">Qty: ${o.qty} · Price: ${fmtPrice(o.price || o.stopPrice)}</div>
+      </div>`).join('');
+  } catch {
+    el.innerHTML = '<div style="color:var(--text-lo);font-size:11px;text-align:center;padding:8px">—</div>';
+  }
+}
+
+async function refreshPositionsAndOrders() {
+  await loadPositions();
+  if (currentSymbol) await loadOpenOrders(currentSymbol);
+}
+
+// Position action handlers
+window.doClosePosition = async (symbol, side, qty) => {
+  if (!confirm(`Close ${side} ${symbol} (${qty})?`)) return;
+  try {
+    await window.trading.closePosition(symbol, side, qty, tradingCreds);
+    showToast(`Position ${symbol} closed`, 'success');
+    await refreshPositionsAndOrders();
+  } catch (e) { showToast('Close failed: ' + e.message, 'error'); }
+};
+
+window.doCancelOrder = async (symbol, orderId) => {
+  try {
+    await window.trading.cancelOrder(symbol, orderId, tradingCreds);
+    showToast('Order cancelled', 'success');
+    await refreshPositionsAndOrders();
+  } catch (e) { showToast('Cancel failed: ' + e.message, 'error'); }
+};
+
+window.doEnableTrailingStop = async (symbol, side, qty, entry) => {
+  const riskInput = prompt(`Enable trailing stop for ${symbol} ${side}\nEnter 1R risk amount in USDT:`, '50');
+  if (!riskInput) return;
+  const R = parseFloat(riskInput);
+  if (isNaN(R) || R <= 0) { showToast('Invalid risk amount', 'error'); return; }
+  window.trading.trailingStop.enable({ symbol, side, positionAmt: qty, entryPrice: entry }, R);
+  showToast(`Trailing stop enabled for ${symbol} (1R = ${R} USDT)`, 'success');
+  renderPositions(await window.trading.getPositions(tradingCreds));
+};
+
+window.doDisableTrailingStop = (symbol) => {
+  window.trading.trailingStop.disable(symbol);
+  showToast(`Trailing stop disabled for ${symbol}`);
+  loadPositions();
+};
+
+// Wire trading module to trailing stop price updates
+window.trading.onLevelAdvance = (symbol, level, stopPrice) => {
+  if (level > 0) showToast(`🎯 ${symbol}: Trail level ${level} — stop now at ${fmtPrice(stopPrice)}`, 'success');
+};
+window.trading.onStopUpdate = (symbol, stopPrice) => {
+  showToast(`🔒 ${symbol}: Stop updated to ${fmtPrice(stopPrice)}`);
+};
 
 setInterval(() => {
   if (document.visibilityState === 'visible') loadPositions();
@@ -1149,3 +1297,116 @@ renderAlerts();
 updateAlertBadge();
 // Load saved symbol once on startup (intentionally not called from loadCoins)
 if (currentSymbol) setTimeout(() => loadChart(currentSymbol, currentExchange), 400);
+
+// ── Service Worker registration ───────────────────────────
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').then(reg => {
+    console.log('[SW] Registered:', reg.scope);
+  }).catch(err => console.warn('[SW] Registration failed:', err));
+
+  // Listen for SW → main thread messages (e.g. FOCUS_SYMBOL from notification click)
+  navigator.serviceWorker.addEventListener('message', ev => {
+    const { type, payload } = ev.data || {};
+    if (type === 'FOCUS_SYMBOL' && payload?.symbol) {
+      selectCoin(payload.symbol, currentExchange);
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.querySelector('[data-tab="alerts"]').classList.add('active');
+      document.getElementById('tab-alerts').classList.add('active');
+    }
+  });
+}
+
+// ── Notify SW when an alert fires ────────────────────────
+function notifySwAlert(alert, price) {
+  if (!navigator.serviceWorker?.controller) return;
+  navigator.serviceWorker.controller.postMessage({
+    type: 'ALERT_FIRE',
+    payload: {
+      id: alert.id, symbol: alert.symbol,
+      alertType: alert.type, price, targetPrice: alert.targetPrice,
+    },
+  });
+}
+
+// ── 12h Volume Change (§9.3) ──────────────────────────────
+// IndexedDB cache keyed by symbol_interval, TTL 12h
+const VC_STORE = 'volumeChanges';
+const VC_TTL   = 12 * 60 * 60 * 1000;
+let   _vcDb    = null;
+
+async function vcDbOpen() {
+  if (_vcDb) return _vcDb;
+  return new Promise((res, rej) => {
+    const req = indexedDB.open('cryptoToolVC', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(VC_STORE, { keyPath: 'id' });
+    req.onsuccess = () => { _vcDb = req.result; res(_vcDb); };
+    req.onerror   = () => rej(req.error);
+  });
+}
+
+async function vcGet(symbol, interval) {
+  try {
+    const db = await vcDbOpen();
+    return new Promise(res => {
+      const req = db.transaction(VC_STORE).objectStore(VC_STORE).get(`${symbol}_${interval}`);
+      req.onsuccess = () => {
+        const e = req.result;
+        res(e && Date.now() - e.ts < VC_TTL ? e.value : null);
+      };
+      req.onerror = () => res(null);
+    });
+  } catch { return null; }
+}
+
+async function vcSet(symbol, interval, value) {
+  try {
+    const db = await vcDbOpen();
+    const tx = db.transaction(VC_STORE, 'readwrite');
+    tx.objectStore(VC_STORE).put({ id: `${symbol}_${interval}`, value, ts: Date.now() });
+  } catch {}
+}
+
+function compute12hVolumeChange(candles, interval) {
+  const ivMs      = intervalMs(interval);
+  const closed    = candles.filter(c => c.volume > 0);
+  if (!closed.length) return null;
+
+  const latestTime = closed[closed.length - 1].openTime;
+  const last12h    = closed.filter(c => c.openTime >= latestTime - VC_TTL && c.openTime < latestTime);
+  const prev12h    = closed.filter(c => c.openTime >= latestTime - 2 * VC_TTL && c.openTime < latestTime - VC_TTL);
+
+  const expected = Math.floor(VC_TTL / ivMs);
+  const minBars  = Math.max(3, Math.floor(expected * 0.25));
+  if (last12h.length < minBars || prev12h.length < minBars) return null;
+
+  const volA = last12h.reduce((s, c) => s + c.volume, 0);
+  const volB = prev12h.reduce((s, c) => s + c.volume, 0);
+  if (volB === 0) return null;
+  return (volA - volB) / volB * 100;
+}
+
+async function updateVolumeChange(symbol, candles, interval) {
+  // Check cache first
+  let vc = await vcGet(symbol, interval);
+  if (vc === null) {
+    vc = compute12hVolumeChange(candles, interval);
+    if (vc !== null) await vcSet(symbol, interval, vc);
+  }
+  if (vc === null) return;
+
+  // Update the allCoins entry
+  const coin = allCoins.find(c => c.fullSymbol === symbol);
+  if (coin) {
+    coin.volumeChange = vc;
+    // Patch the table cell in-place
+    const row = document.querySelector(`.coin-row[data-symbol="${symbol}"]`);
+    if (row) {
+      const cells = row.querySelectorAll('td');
+      if (cells[3]) {
+        cells[3].className = vc > 0 ? 'bull' : vc < 0 ? 'bear' : 'neu';
+        cells[3].textContent = fmtPct(vc);
+      }
+    }
+  }
+}
