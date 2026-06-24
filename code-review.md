@@ -1,0 +1,39 @@
+# Code Review — Crypto Trading Tool
+
+_Tracking file created by code-review-audit skill. Project added on 2026-06-24._
+
+---
+
+## Code Review — 2026-06-24 · commit `add7c2c`
+
+**Range:** `(none — first audit, single-commit repo)` (1 commit, since repo init)
+**Branch:** `main`
+
+### Findings
+
+| Severity | File | Commit | Issue |
+| -------- | ---- | ------ | ----- |
+| 🔴 | `src/lib/*.ts` (all 6 files) | `add7c2c` | All TypeScript modules in `src/lib/` are **dead code** — `public/scripts/app.js` is loaded as a plain `<script type="module">` and `app.js` has zero `import` statements. Empirically confirmed: `npm run build` produces `dist/scripts/app.js` (55,687 bytes) that is byte-identical to `public/scripts/app.js`; none of `calculateDiagonalSR`, `alertsEngine`, `hmacSHA256`, `binanceSignedRequest`, `crossingPrice`, or `ChartRenderer` symbols appear in the built bundle. The TS files serve no runtime purpose — they're spec / scaffold material from a half-finished migration. Either delete them or wire `app.js` to import the compiled output. |
+| 🔴 | `public/scripts/app.js:1072, 1094` | `add7c2c` | **API secret stored in plaintext localStorage** under key `cryptoTool_tradingCredentials`. The UI claim *"Keys are stored locally and never sent to third-party servers"* is misleading — `loadPositions()` (line 1179) sends the API key to Binance every 30s, and the dead `binanceSignedRequest` in `src/lib/risk-calculator.ts:117` will eventually send the secret on every signed order. Any XSS (see 🟡 below) instantly exfiltrates the secret and grants withdrawal-rights (if user mistakenly enables them) or trade-rights. At minimum: name the key clearly, add a TTL/expiry option, and never log it. |
+| 🟡 | `public/scripts/app.js:1184` | `add7c2c` | `renderPositions()` error path injects `e.message` from a Binance fetch failure into `innerHTML` — if Binance/Cloudflare ever returns an HTML error page, the entire error block is parsed as HTML. 10 other `innerHTML =` sites in this file (lines 778, 932, 999, 1002, 1157, 1176, 1191, 1194, 1220, 1264) all interpolate fields sourced from the user's own localStorage or from Binance/Bybit REST responses, which are filtered (`endsWith('USDT')`) and run through `parseFloat`/`fmtPrice`, so they are **low-risk** in practice. Use `textContent` for the error path and `setAttribute('data-…')` + template literals for the data rows to close the door. |
+| 🟡 | `src/lib/alerts-engine.ts:57` | `add7c2c` | `dynamicCrossingPrice(alert, new Map())` — the second argument is ignored (the function only reads `alert.line` shape). Cosmetic, but suggests the `prices` parameter was meant to be used (e.g. a "use current price as anchor when extrapolating" mode). The current code is correct but misleading. Out of scope of the running app — `alertsEngine` is never instantiated — flagging only because it suggests unfinished work. |
+| 🟡 | `public/scripts/app.js:469` | `add7c2c` | `manualLines` are loaded from `localStorage` with no schema validation. If a stored line has a non-finite `ts1`/`price1` (e.g. corrupted by a buggy earlier version), `ts2xFull` returns `NaN` and `drawRay` will throw or render garbage. The `try/catch` only catches the JSON parse, not the field validation. Add a `Number.isFinite(…)` filter when restoring. |
+| 🟡 | `public/scripts/app.js:1042-1068` | `add7c2c` | The "alert polling" interval reads `loadAlertsLocal()` and **mutates** the returned array in place (line 1051: `const all = loadAlertsLocal()` then `al.lastCheckedPrice = p`). The mutation is fine because the object is re-saved on change, but the 2-second interval fires whether or not the page is visible — combined with the 30s `loadPositions` interval and the 2s `pollCurrentPrice` (line 587), this is three concurrent intervals hammering Binance. Worth adding a `document.visibilityState === 'visible'` gate, especially since the README says "Service Worker for background alerts" is TODO. |
+| 🟡 | `public/scripts/app.js:1080-1103` | `add7c2c` | `btn-connect` only validates the API key by hitting `GET /fapi/v2/account?timestamp=…` with `X-MBX-APIKEY`. The **secret is never validated** during connect — a typo on the secret will pass this check, then the dead `binanceSignedRequest` will fail later at order-placement time with a confusing 401. The TS `binanceSignedRequest` is also a no-op for the `GET` branch: `...(method !== 'GET' ? { body: qs } : {})` passes the *query string* as the request body on POST, which Binance will reject — pre-flight failure when the feature is finally wired up. |
+| 🟢 | `public/scripts/app.js:223` | `add7c2c` | `document.getElementById('btn-latest').classList.toggle(…)` — if `#btn-latest` is null (e.g. element removed in a future refactor), this throws. Trivially, use optional chaining: `document.getElementById('btn-latest')?.classList.toggle(…)`. Same pattern in 5+ other DOM lookups. |
+| 🟢 | `public/scripts/app.js:88-91` | `add7c2c` | `localStorage.getItem('cryptoTool_lastSymbol')` is read but never written before `loadChart` runs (`selectCoin` writes it on line 952, after a click). On a hard refresh with no stored value, the boot path silently does nothing — fine, but the empty `currentSymbol` blocks the auto-load on line 1271. Intentional? If so, a comment would help. |
+| 🟢 | `public/styles/global.css` + `src/styles/global.css` | `add7c2c` | **Same 695-line CSS file is committed in two places** (`public/styles/global.css` is the one actually served; `src/styles/global.css` is unreferenced). Delete the `src/styles/` copy or document the duplication. |
+| 🟢 | `src/lib/risk-calculator.ts:131` | `add7c2c` | `binanceSignedRequest`: for non-GET methods, `body: qs` sends the **query string (with `&signature=…`) as the request body** — Binance expects the same params as JSON or form-encoded body, not a query string. This will work for GET calls but fail for any POST. Out of scope of the running app. |
+
+### Summary
+
+First audit of a static Astro deployment of a crypto trading dashboard. The single commit ships a working browser app (`public/scripts/app.js`, 1271 lines) that talks directly to Binance/Bybit from the client, plus a `src/lib/` folder of TypeScript modules that are **never compiled or imported** — confirmed by a clean build: `dist/scripts/app.js` is byte-identical to the source `public/scripts/app.js`. The dead code is roughly 1500 lines of well-structured but un-shipped logic (chart engine, alerts engine, exchange adapters, HMAC signing, risk calculator, diagonal S/R algorithm). The running app handles its own data, scaling, alert polling, and DOM rendering in the monolithic `app.js`.
+
+The two P0s are: (1) the **entire `src/lib/` tree is dead** and should either be deleted or actually wired into the build, and (2) **API secrets stored unencrypted in localStorage** with a misleading "never sent to third-party servers" UI claim — combined with multiple `innerHTML` sinks, this is a real exfil risk. The 🟡 items are concrete correctness/safety issues in the live code (one of them is a real XSS-prone error path; the others are correctness, observability, and pre-flight validation gaps). The 🟢 items are nits.
+
+Three things to look at first: (1) decide whether to ship the TS modules or delete them — they currently inflate the repo without value; (2) fix the `renderPositions` `innerHTML` error path before it ever returns an HTML error page; (3) replace the plaintext `localStorage` secret store with a session-only storage (or at least gate it behind an explicit "remember for 24h" checkbox) before wiring up real order placement.
+
+<!-- code-review-audit:start -->
+<!-- last-reviewed-commit: add7c2cd2a355ee4d6ba864315a61cbbe5aa747a -->
+<!-- last-reviewed-at: 2026-06-24T18:36:41+03:00 -->
+<!-- code-review-audit:end -->
