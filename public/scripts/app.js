@@ -940,6 +940,40 @@ document.getElementById('btn-clear-alerts').addEventListener('click', () => {
   if (confirm('Clear all alerts?')) { saveAlertsLocal([]); renderAlerts(); updateAlertBadge(); markDirty(); }
 });
 
+// Manual alert form — pre-fill symbol from current chart, add on button click
+document.getElementById('btn-add-alert').addEventListener('click', () => {
+  const symInput   = document.getElementById('alert-sym-input');
+  const priceInput = document.getElementById('alert-price-input');
+  const typeInput  = document.getElementById('alert-type-input');
+
+  const sym   = symInput.value.trim().toUpperCase().replace(/\/USDT$/, '') + (symInput.value.includes('USDT') ? '' : 'USDT');
+  const price = parseFloat(priceInput.value);
+  const type  = typeInput.value;
+
+  if (!sym.match(/^[A-Z]+USDT$/)) { showToast('Enter a valid symbol e.g. BTCUSDT', 'error'); return; }
+  if (!price || isNaN(price) || price <= 0) { showToast('Enter a valid price', 'error'); return; }
+
+  const alerts = loadAlertsLocal();
+  alerts.push({
+    id: Date.now().toString(), symbol: sym, type, targetPrice: price,
+    line: null, isActive: true, isTriggered: false,
+    frequency: 'once', createdAt: Date.now(), lastCheckedState: null,
+  });
+  saveAlertsLocal(alerts); renderAlerts(); updateAlertBadge();
+  priceInput.value = '';
+  showToast(`Alert set: ${sym.replace('USDT','/USDT')} ${type} ${fmtPrice(price)}`);
+});
+
+// Pre-fill symbol when switching to Alerts tab
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  if (btn.dataset.tab === 'alerts') {
+    btn.addEventListener('click', () => {
+      const symInput = document.getElementById('alert-sym-input');
+      if (currentSymbol && !symInput.value) symInput.value = currentSymbol;
+    });
+  }
+});
+
 function playAlertSound() {
   try {
     const actx = new AudioContext(), osc = actx.createOscillator(), gain = actx.createGain();
@@ -967,13 +1001,51 @@ setInterval(() => {
         if (!al.isActive || al.isTriggered) continue;
         const p = pm[al.symbol]; if (!p) continue;
         al.lastCheckedPrice = p;
-        const hit = (al.type === 'above' && p >= al.targetPrice) || (al.type === 'below' && p <= al.targetPrice);
+
+        // ── Alert trigger logic (§11.4) ──────────────────
+        // For cross-* types we need state: was price above or below last tick?
+        // lastCheckedState is persisted in the alert object.
+        let hit = false;
+
+        if (al.type === 'above') {
+          hit = p >= al.targetPrice;
+
+        } else if (al.type === 'below') {
+          hit = p <= al.targetPrice;
+
+        } else {
+          // cross-any / cross-above / cross-below — need state machine
+          const currentState = p > al.targetPrice ? 'above' : 'below';
+
+          if (!al.lastCheckedState) {
+            // First observation — record state, don't fire yet
+            al.lastCheckedState = currentState;
+            changed = true; // save the state
+            continue;
+          }
+
+          if (currentState !== al.lastCheckedState) {
+            // Price crossed the target
+            const crossedUp   = currentState === 'above'; // was below, now above
+            const crossedDown  = currentState === 'below'; // was above, now below
+
+            if (al.type === 'cross-any')   hit = true;
+            if (al.type === 'cross-above'  && crossedUp)   hit = true;
+            if (al.type === 'cross-below'  && crossedDown) hit = true;
+
+            al.lastCheckedState = currentState;
+            changed = true; // save new state even if not triggered
+          }
+        }
+
         if (hit) {
           al.isTriggered = true; al.triggeredAt = Date.now(); al.triggerPrice = p;
           if (al.frequency === 'once') al.isActive = false;
           changed = true; playAlertSound();
           notifySwAlert(al, p);
-          showToast(`🚨 ${al.symbol} ${al.type} ${fmtPrice(al.targetPrice)}`, 'success');
+          const typeLabel = { 'above': '▲ crossed above', 'below': '▼ crossed below',
+            'cross-any': '↕ crossed', 'cross-above': '▲ crossed above', 'cross-below': '▼ crossed below' }[al.type] || al.type;
+          showToast(`🚨 ${al.symbol.replace('USDT','/USDT')} ${typeLabel} ${fmtPrice(al.targetPrice)}`, 'success');
         }
       }
       if (changed) { saveAlertsLocal(all); renderAlerts(); updateAlertBadge(); markDirty(); }

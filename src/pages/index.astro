@@ -121,6 +121,23 @@
         <span class="filter-label">Active alerts</span>
         <button class="chart-btn" id="btn-clear-alerts" style="font-size:11px">Clear all</button>
       </div>
+      <!-- Manual alert creation form -->
+      <div id="alert-form" style="padding:8px 10px;border-bottom:1px solid var(--border);background:var(--bg-surface);display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;gap:6px;align-items:center">
+          <input class="filter-input" type="text" id="alert-sym-input" placeholder="BTCUSDT" style="width:90px;text-transform:uppercase" />
+          <input class="filter-input" type="number" id="alert-price-input" placeholder="Price" style="flex:1" />
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select class="filter-select" id="alert-type-input" style="flex:1">
+            <option value="cross-any">↕ Cross (either)</option>
+            <option value="cross-above">▲ Cross above</option>
+            <option value="cross-below">▼ Cross below</option>
+            <option value="above">≥ Price above</option>
+            <option value="below">≤ Price below</option>
+          </select>
+          <button class="chart-btn" id="btn-add-alert" style="white-space:nowrap">+ Add</button>
+        </div>
+      </div>
       <div class="alerts-panel" id="alerts-list"></div>
     </div>
 
