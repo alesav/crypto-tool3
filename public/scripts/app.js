@@ -63,6 +63,7 @@ let manualLines        = [];
 let drawMode           = false;
 let tempLine           = null;
 let selectedLineId     = null;
+let selectedDiagLine   = null;  // selected diagonal S/R line (indicator)
 let isDragging         = false;
 let pointerStart       = null;
 let pointerStartOffset = 0;
@@ -73,6 +74,8 @@ let diagLines          = [];
 let activeIndicator    = 'diagonal';
 let stopLossMode       = false;
 let loadToken          = 0;
+// Endpoint drag state: which line + which endpoint is being dragged
+let dragEndpoint       = null;  // { lineId, endpoint: 0|1 } — 0=ts1/price1, 1=ts2/price2
 
 const MARGINS    = { top: 20, right: 80, bottom: 40, left: 10 };
 const EXTRA_BARS = 5;
@@ -276,9 +279,21 @@ function drawCurrentPrice(ctx, s) {
 
 // ── Diagonal S/R lines ────────────────────────────────────
 function drawDiagLines(ctx, s) {
-  for (const l of diagLines)
-    drawRay(ctx, s, l.ts1, l.price1, l.ts2, l.price2,
-      l.type === 'support' ? '#10b981' : '#f87171', 1.5);
+  for (const l of diagLines) {
+    const isSel = selectedDiagLine && selectedDiagLine.id === l.id;
+    const color = l.type === 'support' ? '#10b981' : '#f87171';
+    drawRay(ctx, s, l.ts1, l.price1, l.ts2, l.price2, isSel ? '#f0b90b' : color, isSel ? 2.5 : 1.5);
+    // Draw crossing-price tag on right edge for selected line
+    if (isSel && l.currentPrice) {
+      const y = p2y(l.currentPrice, s);
+      if (y >= s.ca.y && y <= s.ca.y + s.ca.height) {
+        ctx.fillStyle = '#f0b90b';
+        ctx.font = '10px JetBrains Mono, monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText('▶ ' + fmtPrice(l.currentPrice), s.ca.x + s.ca.width + 2, y + 4);
+      }
+    }
+  }
 }
 
 // ── Manual lines ──────────────────────────────────────────
@@ -577,7 +592,7 @@ function calcDiagSR(data) {
       if (intersects(p2.index, p2.price, p1.index, p1.price, 'support')) continue;
       const cl = priceAt(p2.index, p2.price, p1.index, p1.price, cur);
       if (cl >= data[cur].high) continue;
-      lines.push({ ts1: data[p2.index].openTime, price1: p2.price, ts2: data[p1.index].openTime, price2: p1.price, type: 'support', currentPrice: cl });
+      lines.push({ id: `sr-sup-${sc}`, ts1: data[p2.index].openTime, price1: p2.price, ts2: data[p1.index].openTime, price2: p1.price, type: 'support', currentPrice: cl });
       sc++; break;
     }
   }
@@ -589,7 +604,7 @@ function calcDiagSR(data) {
       if (intersects(p2.index, p2.price, p1.index, p1.price, 'resistance')) continue;
       const cl = priceAt(p2.index, p2.price, p1.index, p1.price, cur);
       if (cl <= data[cur].low) continue;
-      lines.push({ ts1: data[p2.index].openTime, price1: p2.price, ts2: data[p1.index].openTime, price2: p1.price, type: 'resistance', currentPrice: cl });
+      lines.push({ id: `sr-res-${rc}`, ts1: data[p2.index].openTime, price1: p2.price, ts2: data[p1.index].openTime, price2: p1.price, type: 'resistance', currentPrice: cl });
       rc++; break;
     }
   }
@@ -602,18 +617,39 @@ priceCanvas.addEventListener('pointermove', e => {
   crosshairX = e.clientX - rect.left;
   crosshairY = e.clientY - rect.top;
   showCrosshair = true;
+
   if (drawMode && tempLine && chartData.length) {
     const s = computeScale(priceCanvas.clientWidth, priceCanvas.clientHeight);
     tempLine.ts2    = x2ts(crosshairX, s);
     tempLine.price2 = y2p(crosshairY, s);
+    markDirty(); return;
   }
-  if (pointerStart && !drawMode) {
+
+  // Endpoint drag — move one anchor of a selected manual line
+  if (dragEndpoint && !isDragging) {
+    const s    = computeScale(priceCanvas.clientWidth, priceCanvas.clientHeight);
+    const line = manualLines.find(l => l.id === dragEndpoint.lineId);
+    if (line) {
+      const newTs    = x2ts(crosshairX, s);
+      const newPrice = y2p(crosshairY, s);
+      if (dragEndpoint.endpoint === 0) {
+        line.ts1    = newTs;
+        line.price1 = line.isHorizontal ? line.price2 : newPrice;
+      } else {
+        line.ts2    = newTs;
+        line.price2 = line.isHorizontal ? line.price1 : newPrice;
+        if (line.isHorizontal) { line.price1 = line.price2; }
+      }
+      markDirty(); return;
+    }
+  }
+
+  if (pointerStart && !drawMode && !dragEndpoint) {
     const dx = e.clientX - pointerStart.x;
     if (Math.abs(dx) > 5) {
       isDragging = true;
       const s   = computeScale(priceCanvas.clientWidth, priceCanvas.clientHeight);
       const max = Math.max(0, chartData.length - visibleCount);
-      // Drag right (positive dx) → older candles → offset increases
       scrollOffset = Math.max(0, Math.min(max, pointerStartOffset + Math.round(dx / s.xScale)));
     }
   }
@@ -622,18 +658,53 @@ priceCanvas.addEventListener('pointermove', e => {
 
 priceCanvas.addEventListener('pointerdown', e => {
   priceCanvas.setPointerCapture(e.pointerId);
-  pointerStart = { x: e.clientX, y: e.clientY };
+  const rect  = priceCanvas.getBoundingClientRect();
+  const px    = e.clientX - rect.left;
+  const py    = e.clientY - rect.top;
+  isDragging  = false;
+  dragEndpoint = null;
+
+  // Check if click is on a control point of the selected line
+  if (selectedLineId && chartData.length) {
+    const s    = computeScale(priceCanvas.clientWidth, priceCanvas.clientHeight);
+    const line = manualLines.find(l => l.id === selectedLineId);
+    if (line) {
+      const pts = [
+        { ts: line.ts1, pr: line.price1, ep: 0 },
+        { ts: line.ts2, pr: line.price2, ep: 1 },
+      ];
+      for (const { ts, pr, ep } of pts) {
+        const cx = ts2xFull(ts, s), cy = p2y(pr, s);
+        if (Math.hypot(px - cx, py - cy) < 12) {
+          // Hit on control point — start endpoint drag
+          dragEndpoint = { lineId: selectedLineId, endpoint: ep };
+          priceCanvas.style.cursor = 'grab';
+          return; // don't start pan
+        }
+      }
+    }
+  }
+
+  pointerStart       = { x: e.clientX, y: e.clientY };
   pointerStartOffset = scrollOffset;
-  isDragging = false;
 });
 
 priceCanvas.addEventListener('pointerup', e => {
   priceCanvas.releasePointerCapture(e.pointerId);
+
+  // Finish endpoint drag — save the moved line
+  if (dragEndpoint) {
+    saveLinesLocal();
+    dragEndpoint = null;
+    priceCanvas.style.cursor = 'default';
+    markDirty();
+    return;
+  }
   if (!isDragging) handleChartClick(e);
   pointerStart = null; isDragging = false;
 });
 
-priceCanvas.addEventListener('pointercancel', () => { pointerStart = null; isDragging = false; });
+priceCanvas.addEventListener('pointercancel', () => { pointerStart = null; isDragging = false; dragEndpoint = null; priceCanvas.style.cursor = 'default'; });
 priceCanvas.addEventListener('pointerleave',  () => { showCrosshair = false; markDirty(); });
 
 priceCanvas.addEventListener('wheel', e => {
@@ -675,7 +746,7 @@ function handleChartClick(e) {
     return;
   }
 
-  // Hit-test lines
+  // Hit-test manual lines
   for (let i = manualLines.length - 1; i >= 0; i--) {
     const line = manualLines[i];
     const x1 = ts2xFull(line.ts1, s), y1 = p2y(line.price1, s);
@@ -688,23 +759,57 @@ function handleChartClick(e) {
       const t  = (dx * dx + dy * dy) > 0 ? ((x - x1) * dx + (y - y1) * dy) / (dx * dx + dy * dy) : 0;
       dist = Math.hypot(x - (x1 + t * dx), y - (y1 + t * dy));
     }
-    if (dist < 8) { selectedLineId = line.id; showLineStatus(line); markDirty(); return; }
+    if (dist < 8) {
+      selectedLineId  = line.id;
+      selectedDiagLine = null;
+      showLineStatus(line, false); markDirty(); return;
+    }
   }
-  selectedLineId = null;
+
+  // Hit-test diagonal S/R indicator lines (only when diagonal indicator active)
+  if (activeIndicator === 'diagonal') {
+    for (const l of diagLines) {
+      const x1 = ts2xFull(l.ts1, s), y1 = p2y(l.price1, s);
+      const x2 = ts2xFull(l.ts2, s), y2 = p2y(l.price2, s);
+      const dx = x2 - x1, dy = y2 - y1;
+      // Test against extended ray across chart width
+      const slope = Math.abs(dx) > 0.001 ? (y2 - y1) / (x2 - x1) : 0;
+      const lineYatX = y1 + (x - x1) * slope;
+      if (x >= s.ca.x && x <= s.ca.x + s.ca.width && Math.abs(y - lineYatX) < 8) {
+        selectedDiagLine = l;
+        selectedLineId   = null;
+        document.getElementById('line-status').classList.remove('visible');
+        showLineStatus(l, true); markDirty(); return;
+      }
+    }
+  }
+
+  selectedLineId   = null;
+  selectedDiagLine = null;
   document.getElementById('line-status').classList.remove('visible');
   markDirty();
 }
 
-function showLineStatus(line) {
+function showLineStatus(line, isDiag) {
   const popup = document.getElementById('line-status');
-  const price = line.isHorizontal ? fmtPrice(line.price1) : fmtPrice(line.price2);
+  const price = line.isHorizontal ? fmtPrice(line.price1) : fmtPrice(line.currentPrice ?? line.price2);
+  const lineDesc = isDiag
+    ? `${line.type === 'support' ? 'Support' : 'Resistance'} line · now ${price}`
+    : `${line.isHorizontal ? 'Horizontal' : 'Diagonal'} line · ${price}`;
   popup.innerHTML = `
-    <div style="font-family:var(--font-mono);font-size:12px;color:var(--text-hi);margin-bottom:8px">
-      ${line.isHorizontal ? 'Horizontal' : 'Diagonal'} line · ${price}
+    <div style="font-family:var(--font-mono);font-size:12px;color:var(--text-hi);margin-bottom:8px">${lineDesc}</div>
+    <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+      <select id="popup-alert-type" class="filter-select" style="flex:1;height:26px">
+        <option value="cross-any">↕ Cross (either)</option>
+        <option value="cross-above">▲ Cross above</option>
+        <option value="cross-below">▼ Cross below</option>
+        <option value="above">≥ Price above</option>
+        <option value="below">≤ Price below</option>
+      </select>
     </div>
     <div style="display:flex;gap:6px">
-      <button class="alert-btn" onclick="createAlertFromLine('${line.id}')">🔔 Alert</button>
-      <button class="alert-btn danger" onclick="deleteLine('${line.id}')">Delete</button>
+      <button class="alert-btn" onclick="createAlertFromLine('${line.id}', ${isDiag ? 'true' : 'false'})">🔔 Alert</button>
+      ${!isDiag ? `<button class="alert-btn danger" onclick="deleteLine('${line.id}')">Delete</button>` : ''}
     </div>`;
   popup.classList.add('visible');
 }
@@ -716,18 +821,47 @@ window.deleteLine = id => {
   saveLinesLocal(); markDirty();
 };
 
-window.createAlertFromLine = id => {
-  const line = manualLines.find(l => l.id === id);
+window.createAlertFromLine = (id, isDiagLine) => {
+  // Find in manual lines or diagonal lines
+  const line = isDiagLine
+    ? diagLines.find(l => l.id === id)
+    : manualLines.find(l => l.id === id);
   if (!line || !currentSymbol) return;
-  const price = line.isHorizontal ? line.price1 : line.price2;
+
+  const type  = document.getElementById('popup-alert-type')?.value || 'cross-any';
+
+  // For diagonal lines, targetPrice = current crossing price (re-computed on each poll)
+  // The alert stores the line anchors so crossing price is always computed live
+  const targetPrice = line.isHorizontal
+    ? line.price1
+    : (line.currentPrice ?? line.price2);
+
+  // Store line anchors only for non-horizontal lines (for dynamic crossing price)
+  const lineData = (!line.isHorizontal && line.ts1 && line.ts2)
+    ? { ts1: line.ts1, price1: line.price1, ts2: line.ts2, price2: line.price2 }
+    : null;
+
   const alerts = loadAlertsLocal();
-  alerts.push({ id: Date.now().toString(), symbol: currentSymbol, type: 'cross-any', targetPrice: price,
-    line: line.isHorizontal ? null : { ts1: line.ts1, price1: line.price1, ts2: line.ts2, price2: line.price2 },
-    isActive: true, isTriggered: false, frequency: 'once', createdAt: Date.now() });
+  alerts.push({
+    id: Date.now().toString(), symbol: currentSymbol, type,
+    targetPrice, line: lineData,
+    isActive: true, isTriggered: false, frequency: 'once',
+    createdAt: Date.now(), lastCheckedState: null,
+  });
   saveAlertsLocal(alerts); renderAlerts(); updateAlertBadge();
-  showToast('Alert created at ' + fmtPrice(price));
+  showToast(`Alert: ${currentSymbol.replace('USDT','/USDT')} ${type} ${fmtPrice(targetPrice)}`);
   document.getElementById('line-status').classList.remove('visible');
+  markDirty();
 };
+
+// Compute the dynamic crossing price for a diagonal alert line at the current moment.
+// Uses timestamp-based linear interpolation (spec §7.6).
+// This is called every poll tick so the target moves correctly as the line advances.
+function dynamicCrossingPrice(alertLine) {
+  if (!alertLine || alertLine.ts1 === alertLine.ts2) return alertLine?.price1 ?? null;
+  const slope = (alertLine.price2 - alertLine.price1) / (alertLine.ts2 - alertLine.ts1);
+  return alertLine.price1 + slope * (Date.now() - alertLine.ts1);
+}
 
 function saveLinesLocal() {
   try { localStorage.setItem(`cryptoTool_lines_${currentSymbol}`, JSON.stringify(manualLines)); } catch {}
@@ -781,7 +915,8 @@ window.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   switch (e.key) {
     case 'Escape':
-      drawMode = false; tempLine = null; stopLossMode = false; selectedLineId = null;
+      drawMode = false; tempLine = null; stopLossMode = false;
+      selectedLineId = null; selectedDiagLine = null; dragEndpoint = null;
       document.getElementById('btn-draw').classList.remove('active');
       priceCanvas.style.cursor = 'default';
       document.getElementById('line-status').classList.remove('visible'); markDirty(); break;
@@ -912,22 +1047,49 @@ function renderAlerts() {
   const alerts = loadAlertsLocal();
   const el     = document.getElementById('alerts-list');
   if (!alerts.length) {
-    el.innerHTML = '<div class="alerts-empty">No alerts set.<br>Click a line on the chart to add one.</div>';
+    el.innerHTML = '<div class="alerts-empty">No alerts set.<br>Use the form above or click a chart line to add one.</div>';
     return;
   }
-  el.innerHTML = alerts.map(a => `
-    <div class="alert-item ${a.isTriggered ? 'triggered' : 'active'}">
+  el.innerHTML = alerts.map(a => {
+    // Live price info
+    const livePrice = a.lastCheckedPrice;
+    const target    = a.targetPrice;
+    let priceInfo   = '';
+    if (livePrice && target) {
+      const dist    = ((livePrice - target) / target * 100);
+      const sign    = dist >= 0 ? '+' : '';
+      const cls     = dist >= 0 ? 'bull' : 'bear';
+      const distLbl = `${sign}${dist.toFixed(2)}%`;
+      priceInfo = `<div style="font-size:11px;margin-top:2px">
+        <span style="color:var(--text-mid)">Now: </span>
+        <span class="${cls}" style="font-family:var(--font-mono)">${fmtPrice(livePrice)}</span>
+        <span style="color:var(--text-lo)"> (${distLbl})</span>
+      </div>`;
+    }
+    const typeLabels = {
+      'above': '≥ above', 'below': '≤ below',
+      'cross-any': '↕ cross', 'cross-above': '▲ cross↑', 'cross-below': '▼ cross↓'
+    };
+    const typeLabel = typeLabels[a.type] || a.type;
+    const isDiag    = a.line && (a.line.ts1 !== a.line.ts2);
+    const diagNote  = isDiag ? '<span style="font-size:9px;color:var(--text-lo);margin-left:4px">diagonal</span>' : '';
+    return `<div class="alert-item ${a.isTriggered ? 'triggered' : 'active'}">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <span class="alert-sym">${a.symbol.replace('USDT','/USDT')}</span>
-        <span style="font-size:11px">${a.isTriggered ? '✓' : '🚨'} ${a.type}</span>
+        <button class="alert-sym" onclick="selectCoin('${a.symbol}','binance');document.querySelector('[data-tab=coins]').click()"
+          style="background:none;border:none;cursor:pointer;color:var(--text-hi);font-family:var(--font-mono);font-size:13px;font-weight:600;padding:0;text-align:left">
+          ${a.symbol.replace('USDT','/USDT')} ↗
+        </button>
+        <span style="font-size:10px;color:var(--text-lo)">${a.isTriggered ? '✓' : '🚨'} ${typeLabel}${diagNote}</span>
       </div>
-      <div class="alert-price">${fmtPrice(a.targetPrice)}</div>
+      <div class="alert-price" style="font-family:var(--font-mono)">${fmtPrice(target)}</div>
+      ${priceInfo}
       ${a.triggeredAt ? `<div style="font-size:10px;color:var(--text-lo)">Triggered: ${new Date(a.triggeredAt).toLocaleTimeString()}</div>` : ''}
       <div class="alert-actions">
         <button class="alert-btn danger" onclick="removeAlert('${a.id}')">Remove</button>
         ${!a.isTriggered ? `<button class="alert-btn" onclick="toggleAlert('${a.id}')">${a.isActive ? 'Disable' : 'Enable'}</button>` : ''}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 window.removeAlert = id => { saveAlertsLocal(loadAlertsLocal().filter(a => a.id !== id)); renderAlerts(); updateAlertBadge(); markDirty(); };
@@ -1005,17 +1167,28 @@ setInterval(() => {
         // ── Alert trigger logic (§11.4) ──────────────────
         // For cross-* types we need state: was price above or below last tick?
         // lastCheckedState is persisted in the alert object.
+        // For diagonal line alerts, the target price is computed dynamically.
         let hit = false;
 
+        // Determine the effective target price (static or dynamic diagonal)
+        const effectiveTarget = al.line
+          ? dynamicCrossingPrice(al.line)
+          : al.targetPrice;
+
+        if (!effectiveTarget) continue;
+
+        // Update the stored targetPrice so renderAlerts shows the live level
+        al.targetPrice = al.line ? effectiveTarget : al.targetPrice;
+
         if (al.type === 'above') {
-          hit = p >= al.targetPrice;
+          hit = p >= effectiveTarget;
 
         } else if (al.type === 'below') {
-          hit = p <= al.targetPrice;
+          hit = p <= effectiveTarget;
 
         } else {
           // cross-any / cross-above / cross-below — need state machine
-          const currentState = p > al.targetPrice ? 'above' : 'below';
+          const currentState = p > effectiveTarget ? 'above' : 'below';
 
           if (!al.lastCheckedState) {
             // First observation — record state, don't fire yet
@@ -1026,15 +1199,15 @@ setInterval(() => {
 
           if (currentState !== al.lastCheckedState) {
             // Price crossed the target
-            const crossedUp   = currentState === 'above'; // was below, now above
-            const crossedDown  = currentState === 'below'; // was above, now below
+            const crossedUp   = currentState === 'above';
+            const crossedDown  = currentState === 'below';
 
             if (al.type === 'cross-any')   hit = true;
             if (al.type === 'cross-above'  && crossedUp)   hit = true;
             if (al.type === 'cross-below'  && crossedDown) hit = true;
 
             al.lastCheckedState = currentState;
-            changed = true; // save new state even if not triggered
+            changed = true;
           }
         }
 
