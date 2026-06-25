@@ -1171,9 +1171,13 @@ function renderPositions(positions) {
   }).join('');
 }
 
+// FIX: guard early — clear any stale "Loading…" before checking symbol
 async function loadOpenOrders(symbol) {
-  if (!tradingCreds || !symbol) return;
   const el = document.getElementById('orders-list');
+  if (!tradingCreds || !symbol) {
+    el.innerHTML = '<div style="color:var(--text-lo);font-size:11px;text-align:center;padding:8px">No open orders</div>';
+    return;
+  }
   el.innerHTML = '<div style="color:var(--text-lo);font-size:11px;text-align:center;padding:8px">Loading…</div>';
   try {
     const orders = await window.trading.getOpenOrders(symbol, tradingCreds);
@@ -1222,9 +1226,11 @@ window.doEnableTrailingStop = async (symbol, side, qty, entry) => {
   if (!riskInput) return;
   const R = parseFloat(riskInput);
   if (isNaN(R) || R <= 0) { showToast('Invalid risk amount', 'error'); return; }
+  // Note: qty is snapshotted at button-click time. If position size changes
+  // after enabling (partial close, add-to), disable and re-enable trailing stop.
   window.trading.trailingStop.enable({ symbol, side, positionAmt: qty, entryPrice: entry }, R);
   showToast(`Trailing stop enabled for ${symbol} (1R = ${R} USDT)`, 'success');
-  renderPositions(await window.trading.getPositions(tradingCreds));
+  renderPositions(await window.trading.getPositions());
 };
 
 window.doDisableTrailingStop = (symbol) => {
