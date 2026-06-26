@@ -1137,20 +1137,104 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 });
 
 function playAlertSound() {
+  // Loud multi-beep alert sound using WebAudio
   try {
-    const actx = new AudioContext(), osc = actx.createOscillator(), gain = actx.createGain();
-    osc.connect(gain); gain.connect(actx.destination);
-    osc.frequency.setValueAtTime(880, actx.currentTime);
-    osc.frequency.exponentialRampToValueAtTime(440, actx.currentTime + 0.15);
-    gain.gain.setValueAtTime(0.3, actx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + 0.4);
-    osc.start(); osc.stop(actx.currentTime + 0.4);
+    const actx  = new AudioContext();
+    const now   = actx.currentTime;
+
+    // Three descending beeps: 880Hz → 660Hz → 440Hz
+    const beeps = [
+      { freq: 880, start: 0,    dur: 0.18 },
+      { freq: 880, start: 0.22, dur: 0.18 },
+      { freq: 660, start: 0.44, dur: 0.18 },
+      { freq: 660, start: 0.66, dur: 0.18 },
+      { freq: 440, start: 0.88, dur: 0.30 },
+    ];
+
+    for (const b of beeps) {
+      const osc  = actx.createOscillator();
+      const gain = actx.createGain();
+      osc.connect(gain);
+      gain.connect(actx.destination);
+      osc.type = 'square'; // harsher = more noticeable
+      osc.frequency.setValueAtTime(b.freq, now + b.start);
+      gain.gain.setValueAtTime(0,   now + b.start);
+      gain.gain.linearRampToValueAtTime(0.7, now + b.start + 0.01); // quick attack, louder
+      gain.gain.setValueAtTime(0.7, now + b.start + b.dur - 0.02);
+      gain.gain.linearRampToValueAtTime(0,   now + b.start + b.dur);
+      osc.start(now + b.start);
+      osc.stop(now  + b.start + b.dur + 0.01);
+    }
+
+    // Trigger device vibration if available (Android)
+    if ('vibrate' in navigator) {
+      navigator.vibrate([200, 100, 200, 100, 400]);
+    }
   } catch {}
 }
 
-// FIX: skip alert polling when tab is hidden
+// ── Full-screen alert banner (on top of everything) ───────
+function showAlertBanner(alert, price) {
+  // Remove any existing banner
+  document.getElementById('alert-banner')?.remove();
+
+  const sym   = alert.symbol.replace('USDT', '/USDT');
+  const typeLabels = {
+    'above': '▲ crossed above', 'below': '▼ crossed below',
+    'cross-any': '↕ crossed', 'cross-above': '▲ crossed above', 'cross-below': '▼ crossed below',
+  };
+  const dir = typeLabels[alert.type] || alert.type;
+
+  const banner = document.createElement('div');
+  banner.id = 'alert-banner';
+  banner.style.cssText = `
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(246,70,93,0.96);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 12px; padding: 24px;
+    animation: banner-in 0.2s ease;
+    cursor: pointer;
+  `;
+
+  const style = document.createElement('style');
+  style.textContent = `
+    @keyframes banner-in {
+      from { opacity: 0; transform: scale(0.95); }
+      to   { opacity: 1; transform: scale(1); }
+    }
+  `;
+  document.head.appendChild(style);
+
+  banner.innerHTML = `
+    <div style="font-size:48px;line-height:1">🚨</div>
+    <div style="font-size:28px;font-weight:900;color:#fff;letter-spacing:0.02em">${sym}</div>
+    <div style="font-size:18px;color:rgba(255,255,255,0.9);font-weight:600">${dir} ${fmtPrice(alert.targetPrice)}</div>
+    <div style="font-size:32px;font-weight:700;color:#fff;font-family:monospace">${fmtPrice(price)}</div>
+    <div style="font-size:13px;color:rgba(255,255,255,0.7);margin-top:4px">Tap anywhere to dismiss and open chart</div>
+  `;
+
+  // Tap dismisses and opens the coin
+  banner.addEventListener('pointerdown', () => {
+    banner.remove();
+    selectCoin(alert.symbol, 'binance');
+    // Switch to chart (coins tab)
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelector('[data-tab="coins"]')?.classList.add('active');
+    document.getElementById('tab-coins')?.classList.add('active');
+  });
+
+  document.body.appendChild(banner);
+
+  // Auto-dismiss after 30s
+  setTimeout(() => banner.remove(), 30_000);
+}
+
+// FIX: alert polling must run even when tab is backgrounded (visibilityState hidden)
+// so alerts fire on Android when the user switches apps.
+// Only the chart price refresh (pollCurrentPrice) is gated on visibility.
 setInterval(() => {
-  if (document.visibilityState !== 'visible') return;
   const active = loadAlertsLocal().filter(a => a.isActive && !a.isTriggered);
   if (!active.length) return;
   const syms = [...new Set(active.map(a => a.symbol))].slice(0, 20);
@@ -1214,11 +1298,14 @@ setInterval(() => {
         if (hit) {
           al.isTriggered = true; al.triggeredAt = Date.now(); al.triggerPrice = p;
           if (al.frequency === 'once') al.isActive = false;
-          changed = true; playAlertSound();
+          changed = true;
+          playAlertSound();
           notifySwAlert(al, p);
+          // Full-screen banner when tab is visible; SW notification handles background
+          if (document.visibilityState === 'visible') showAlertBanner(al, p);
           const typeLabel = { 'above': '▲ crossed above', 'below': '▼ crossed below',
             'cross-any': '↕ crossed', 'cross-above': '▲ crossed above', 'cross-below': '▼ crossed below' }[al.type] || al.type;
-          showToast(`🚨 ${al.symbol.replace('USDT','/USDT')} ${typeLabel} ${fmtPrice(al.targetPrice)}`, 'success');
+          showToast(`🚨 ${al.symbol.replace('USDT','/USDT')} ${typeLabel} ${fmtPrice(effectiveTarget)}`, 'success');
         }
       }
       if (changed) { saveAlertsLocal(all); renderAlerts(); updateAlertBadge(); markDirty(); }
@@ -1549,7 +1636,31 @@ updateAlertBadge();
 // Load saved symbol once on startup (intentionally not called from loadCoins)
 if (currentSymbol) setTimeout(() => loadChart(currentSymbol, currentExchange), 400);
 
-// ── Service Worker registration ───────────────────────────
+// ── Notification permission ───────────────────────────────
+// Must be requested from a user gesture on Android Chrome.
+// We expose a button rather than requesting on load.
+function updateNotifBtn() {
+  const btn = document.getElementById('btn-notif-permission');
+  if (!btn) return;
+  if (!('Notification' in window)) { btn.style.display = 'none'; return; }
+  if (Notification.permission === 'granted') {
+    btn.textContent = '🔔 Notifs on'; btn.style.color = 'var(--bull)'; btn.disabled = true;
+  } else if (Notification.permission === 'denied') {
+    btn.textContent = '🔕 Blocked'; btn.style.color = 'var(--bear)'; btn.disabled = true;
+  } else {
+    btn.textContent = '🔔 Allow notifs'; btn.disabled = false;
+  }
+}
+
+document.getElementById('btn-notif-permission')?.addEventListener('click', async () => {
+  if (!('Notification' in window)) return;
+  const perm = await Notification.requestPermission();
+  updateNotifBtn();
+  if (perm === 'granted') showToast('Notifications enabled ✓', 'success');
+  else if (perm === 'denied') showToast('Notifications blocked — enable in browser settings', 'error');
+});
+
+updateNotifBtn(); // set initial state on load
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').then(reg => {
     console.log('[SW] Registered:', reg.scope);

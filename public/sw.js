@@ -104,18 +104,28 @@ self.addEventListener('message', async event => {
 
   if (type === 'ALERT_FIRE') {
     const { symbol, alertType, price, targetPrice, id } = payload;
-    const body = `${symbol.replace('USDT', '/USDT')} ${alertType} ${formatPrice(targetPrice)} — hit ${formatPrice(price)}`;
-    await self.registration.showNotification('🚨 Crypto Alert', {
+    const sym  = symbol.replace('USDT', '/USDT');
+    const dir  = {
+      'above': '▲ ABOVE', 'below': '▼ BELOW',
+      'cross-any': '↕ CROSSED', 'cross-above': '▲ CROSSED UP', 'cross-below': '▼ CROSSED DOWN',
+    }[alertType] || alertType.toUpperCase();
+
+    const title = `🚨 ${sym} — Price Alert`;
+    const body  = `${dir} ${formatPrice(targetPrice)}\nCurrent price: ${formatPrice(price)}`;
+
+    await self.registration.showNotification(title, {
       body,
       icon:    '/favicon.svg',
       badge:   '/favicon.svg',
       tag:     `alert-${id}`,
       renotify: true,
-      requireInteraction: true,
+      requireInteraction: true,   // stays on screen until dismissed (Android + desktop)
+      silent:  false,             // use system notification sound
+      vibrate: [300, 100, 300, 100, 600],  // long-short-long vibration on Android
       data:    { symbol, url: `/?symbol=${symbol}` },
       actions: [
-        { action: 'view',    title: 'View chart' },
-        { action: 'dismiss', title: 'Dismiss'    },
+        { action: 'view',    title: '📊 Open chart' },
+        { action: 'dismiss', title: 'Dismiss'       },
       ],
     });
   }

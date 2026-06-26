@@ -117,9 +117,12 @@
 
     <!-- Alerts tab -->
     <div class="tab-panel" id="tab-alerts" role="tabpanel">
-      <div class="filters-bar" style="justify-content:space-between">
+      <div class="filters-bar" style="justify-content:space-between;gap:6px">
         <span class="filter-label">Active alerts</span>
-        <button class="chart-btn" id="btn-clear-alerts" style="font-size:11px">Clear all</button>
+        <div style="display:flex;gap:6px">
+          <button class="chart-btn" id="btn-notif-permission" title="Enable push notifications" style="font-size:11px">🔔 Allow notifs</button>
+          <button class="chart-btn" id="btn-clear-alerts" style="font-size:11px">Clear all</button>
+        </div>
       </div>
       <!-- Manual alert creation form -->
       <div id="alert-form" style="padding:8px 10px;border-bottom:1px solid var(--border);background:var(--bg-surface);display:flex;flex-direction:column;gap:6px">
